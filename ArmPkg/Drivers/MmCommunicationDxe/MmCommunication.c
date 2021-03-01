@@ -18,6 +18,7 @@
 
 #include <Protocol/MmCommunication2.h>
 
+#include <IndustryStandard/ArmFfaSvc.h>
 #include <IndustryStandard/ArmStdSmc.h>
 
 #include "MmCommunicate.h"
@@ -73,6 +74,7 @@ MmCommunication2Communicate (
   ARM_SMC_ARGS                CommunicateSmcArgs;
   EFI_STATUS                  Status;
   UINTN                       BufferSize;
+  UINTN                       Ret;
 
   Status = EFI_ACCESS_DENIED;
   BufferSize = 0;
@@ -124,26 +126,55 @@ MmCommunication2Communicate (
     return EFI_BAD_BUFFER_SIZE;
   }
 
-  // SMC Function ID
-  CommunicateSmcArgs.Arg0 = ARM_SMC_ID_MM_COMMUNICATE_AARCH64;
-
-  // Cookie
-  CommunicateSmcArgs.Arg1 = 0;
-
   // Copy Communication Payload
   CopyMem ((VOID *)mNsCommBuffMemRegion.VirtualBase, CommBufferVirtual, BufferSize);
 
-  // comm_buffer_address (64-bit physical address)
-  CommunicateSmcArgs.Arg2 = (UINTN)mNsCommBuffMemRegion.PhysicalBase;
+  // Use the FF-A interface if enabled.
+  if (FeaturePcdGet (PcdFfaEnable)) {
+    // FF-A Interface ID for direct message communication
+    CommunicateSmcArgs.Arg0 = ARM_SVC_ID_FFA_MSG_SEND_DIRECT_REQ_AARCH64;
 
-  // comm_size_address (not used, indicated by setting to zero)
-  CommunicateSmcArgs.Arg3 = 0;
+    // FF-A Destination EndPoint ID, not used as of now
+    CommunicateSmcArgs.Arg1 = 0x0;
+
+    // Reserved for future use(MBZ)
+    CommunicateSmcArgs.Arg2 = 0x0;
+
+    // Arg3 onwards are the IMPLEMENTATION DEFINED FF-A parameters
+    // SMC Function ID
+    CommunicateSmcArgs.Arg3 = ARM_SMC_ID_MM_COMMUNICATE_AARCH64;
+
+    // Cookie
+    CommunicateSmcArgs.Arg4 = 0x0;
+
+    // comm_buffer_address (64-bit physical address)
+    CommunicateSmcArgs.Arg5 = (UINTN)mNsCommBuffMemRegion.PhysicalBase;
+
+    // comm_size_address (not used, indicated by setting to zero)
+    CommunicateSmcArgs.Arg6 = 0;
+  } else {
+    // SMC Function ID
+    CommunicateSmcArgs.Arg0 = ARM_SMC_ID_MM_COMMUNICATE_AARCH64;
+
+    // Cookie
+    CommunicateSmcArgs.Arg1 = 0;
+
+    // comm_buffer_address (64-bit physical address)
+    CommunicateSmcArgs.Arg2 = (UINTN)mNsCommBuffMemRegion.PhysicalBase;
+
+    // comm_size_address (not used, indicated by setting to zero)
+    CommunicateSmcArgs.Arg3 = 0;
+  }
 
   // Call the Standalone MM environment.
   ArmCallSmc (&CommunicateSmcArgs);
 
-  switch (CommunicateSmcArgs.Arg0) {
-  case ARM_SMC_MM_RET_SUCCESS:
+  Ret = CommunicateSmcArgs.Arg0;
+
+  if ((FeaturePcdGet (PcdFfaEnable) &&
+      (Ret == ARM_SVC_ID_FFA_SUCCESS_AARCH64)) ||
+      (Ret == ARM_SMC_MM_RET_SUCCESS))
+  {
     ZeroMem (CommBufferVirtual, BufferSize);
     // On successful return, the size of data being returned is inferred from
     // MessageLength + Header.
@@ -158,8 +189,14 @@ MmCommunication2Communicate (
       BufferSize
       );
     Status = EFI_SUCCESS;
-    break;
+    return Status;
+  }
 
+  if (FeaturePcdGet (PcdFfaEnable))
+    Ret = CommunicateSmcArgs.Arg2;
+
+  // Error Codes are same for FF-A and SMC interface
+  switch (Ret) {
   case ARM_SMC_MM_RET_INVALID_PARAMS:
     Status = EFI_INVALID_PARAMETER;
     break;
@@ -233,8 +270,14 @@ GetMmCompatibility ()
   UINT32       MmVersion;
   ARM_SMC_ARGS MmVersionArgs;
 
-  // MM_VERSION uses SMC32 calling conventions
-  MmVersionArgs.Arg0 = ARM_SMC_ID_MM_VERSION_AARCH32;
+  if (FeaturePcdGet (PcdFfaEnable)) {
+    MmVersionArgs.Arg0 = ARM_SVC_ID_FFA_VERSION_AARCH32;
+    MmVersionArgs.Arg1 = MM_CALLER_MAJOR_VER << MM_MAJOR_VER_SHIFT;
+    MmVersionArgs.Arg1 |= MM_CALLER_MINOR_VER;
+  } else {
+    // MM_VERSION uses SMC32 calling conventions
+    MmVersionArgs.Arg0 = ARM_SMC_ID_MM_VERSION_AARCH32;
+  }
 
   ArmCallSmc (&MmVersionArgs);
 
