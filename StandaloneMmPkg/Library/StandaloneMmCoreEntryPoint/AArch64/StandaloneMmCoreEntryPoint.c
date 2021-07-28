@@ -16,6 +16,7 @@ SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <Guid/MmramMemoryReserve.h>
 #include <Guid/MpInformation.h>
 
+#include <libfdt.h>
 #include <Library/ArmMmuLib.h>
 #include <Library/ArmSvcLib.h>
 #include <Library/DebugLib.h>
@@ -45,33 +46,31 @@ STATIC CONST UINT32 mSpmMinorVerFfa = SPM_MINOR_VERSION_FFA;
 PI_MM_ARM_TF_CPU_DRIVER_ENTRYPOINT      CpuDriverEntryPoint = NULL;
 
 /**
-  Retrieve a pointer to and print the boot information passed by privileged
-  secure firmware.
+  Prints boot information.
 
-  @param  [in] SharedBufAddress   The pointer memory shared with privileged
-                                  firmware.
+  This function prints the boot information, which is passed by privileged
+  secure firmware through shared buffer or other mechanism.
 
+  @param  [in] PayloadBootInfo   Pointer to StandaloneMM Boot Info structure.
 **/
-EFI_SECURE_PARTITION_BOOT_INFO *
-GetAndPrintBootinformation (
-  IN VOID                      *SharedBufAddress
+VOID
+PrintBootinformation (
+  IN EFI_SECURE_PARTITION_BOOT_INFO *PayloadBootInfo
 )
 {
-  EFI_SECURE_PARTITION_BOOT_INFO *PayloadBootInfo;
   EFI_SECURE_PARTITION_CPU_INFO  *PayloadCpuInfo;
   UINTN                          Index;
 
-  PayloadBootInfo = (EFI_SECURE_PARTITION_BOOT_INFO *) SharedBufAddress;
 
   if (PayloadBootInfo == NULL) {
     DEBUG ((DEBUG_ERROR, "PayloadBootInfo NULL\n"));
-    return NULL;
+    return;
   }
 
   if (PayloadBootInfo->Header.Version != BOOT_PAYLOAD_VERSION) {
     DEBUG ((DEBUG_ERROR, "Boot Information Version Mismatch. Current=0x%x, Expected=0x%x.\n",
             PayloadBootInfo->Header.Version, BOOT_PAYLOAD_VERSION));
-    return NULL;
+    return;
   }
 
   DEBUG ((DEBUG_INFO, "NumSpMemRegions - 0x%x\n", PayloadBootInfo->NumSpMemRegions));
@@ -96,7 +95,7 @@ GetAndPrintBootinformation (
 
   if (PayloadCpuInfo == NULL) {
     DEBUG ((DEBUG_ERROR, "PayloadCpuInfo NULL\n"));
-    return NULL;
+    return;
   }
 
   for (Index = 0; Index < PayloadBootInfo->NumCpus; Index++) {
@@ -105,7 +104,7 @@ GetAndPrintBootinformation (
     DEBUG ((DEBUG_INFO, "Flags           - 0x%x\n", PayloadCpuInfo[Index].Flags));
   }
 
-  return PayloadBootInfo;
+  return;
 }
 
 /**
@@ -192,6 +191,119 @@ DelegatedEventLoop (
       EventCompleteSvcArgs->Arg1 = SvcStatus;
     }
   }
+}
+
+/**
+  Populates StandAloneMM boot information structure.
+
+  This function receives dtb Address, where StMM Boot information specific
+  properties will be looked out to form the booting structure of type
+  EFI_SECURE_PARTITION_BOOT_INFO. At first, the properties for StandAloneMM
+  ConfigSize and  Memory limit will be checked out. Boot information will
+  be stored at address (Memory Limit - ConfigSize). Thereafter all boot
+  information specific properties will be parsed and corresponding values
+  will be obtained.
+
+  @param  [out] BootInfo   Pointer, where Boot Info structure will be populated.
+  @param  [in] DtbAddress  Address of the Device tree from where Boot
+                           information will be fetched.
+**/
+VOID
+PopulateBootinformation (
+  OUT EFI_SECURE_PARTITION_BOOT_INFO **BootInfo,
+  IN VOID   *DtbAddress
+)
+{
+  INT32           Offset;
+  CONST UINT32    *Property;
+  CONST UINT64    *Property64;
+  UINT32          ConfigSize;
+  UINT64          SpMemLimit;
+  EFI_SECURE_PARTITION_BOOT_INFO *PayloadBootInfo;
+
+  Offset = fdt_node_offset_by_compatible (DtbAddress, -1, "config-size");
+  if (Offset < 0) {
+    DEBUG ((DEBUG_WARN, "Total Config Size is not  defined\n"));
+  } else {
+    Property = fdt_getprop (DtbAddress, Offset, "size", NULL);
+    if (Property) {
+      ConfigSize = fdt32_to_cpu (*Property);
+      DEBUG ((DEBUG_INFO, "stmm dtb config-size  = 0x%x \n", ConfigSize));
+    }
+  }
+
+  Offset = fdt_node_offset_by_compatible (DtbAddress, -1, "bootargs");
+  if (Offset >= 0) {
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_mem_limit", NULL);
+    SpMemLimit = fdt64_to_cpu (*Property64);
+  }
+
+  if (SpMemLimit && ConfigSize)
+    PayloadBootInfo =
+      (EFI_SECURE_PARTITION_BOOT_INFO *)(SpMemLimit - ConfigSize);
+
+  if (PayloadBootInfo) {
+    PayloadBootInfo->SpMemLimit = SpMemLimit;
+
+    Property =  fdt_getprop (DtbAddress, Offset, "h_type", NULL);
+    PayloadBootInfo->Header.Type = (UINT8) fdt32_to_cpu(*Property);
+
+    Property =  fdt_getprop (DtbAddress, Offset, "h_version", NULL);
+    PayloadBootInfo->Header.Version = (UINT8) fdt32_to_cpu(*Property);
+
+    Property =  fdt_getprop (DtbAddress, Offset, "h_size", NULL);
+    PayloadBootInfo->Header.Size = (UINT8) fdt32_to_cpu(*Property);
+
+    Property =  fdt_getprop (DtbAddress, Offset, "h_attr", NULL);
+    PayloadBootInfo->Header.Attr = fdt32_to_cpu(*Property);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_mem_base", NULL);
+    PayloadBootInfo->SpMemBase = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_image_base", NULL);
+    PayloadBootInfo->SpImageBase = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_stack_base", NULL);
+    PayloadBootInfo->SpStackBase = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_heap_base", NULL);
+    PayloadBootInfo->SpHeapBase = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_ns_comm_buf_base", NULL);
+    PayloadBootInfo->SpNsCommBufBase = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_shared_buf_base", NULL);
+    PayloadBootInfo->SpSharedBufBase = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_image_size", NULL);
+    PayloadBootInfo->SpImageSize = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_pcpu_stack_size", NULL);
+    PayloadBootInfo->SpPcpuStackSize = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_heap_size", NULL);
+    PayloadBootInfo->SpHeapSize = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_ns_comm_buf_size", NULL);
+    PayloadBootInfo->SpNsCommBufSize = fdt64_to_cpu(*Property64);
+
+    Property64 =  fdt_getprop (DtbAddress, Offset, "sp_shared_buf_size", NULL);
+    PayloadBootInfo->SpPcpuSharedBufSize = fdt64_to_cpu(*Property64);
+
+    Property =  fdt_getprop (DtbAddress, Offset, "num_sp_mem_regions", NULL);
+    PayloadBootInfo->NumSpMemRegions = fdt32_to_cpu(*Property);
+
+    Property =  fdt_getprop (DtbAddress, Offset, "num_cpus", NULL);
+    PayloadBootInfo->NumCpus = fdt32_to_cpu(*Property);
+
+    PayloadBootInfo->CpuInfo =
+      (EFI_SECURE_PARTITION_CPU_INFO *)((UINT64)PayloadBootInfo +
+                                        sizeof(EFI_SECURE_PARTITION_BOOT_INFO));
+  }
+
+  *BootInfo = PayloadBootInfo;
+
+  return;
 }
 
 /**
@@ -313,6 +425,7 @@ _ModuleEntryPoint (
   VOID                                    *TeData;
   UINTN                                   TeDataSize;
   EFI_PHYSICAL_ADDRESS                    ImageBase;
+  VOID                                    *DtbAddress;
 
   // Get Secure Partition Manager Version Information
   Status = GetSpmVersion ();
@@ -320,11 +433,23 @@ _ModuleEntryPoint (
     goto finish;
   }
 
-  PayloadBootInfo = GetAndPrintBootinformation (SharedBufAddress);
+  // In cookie1 the DTB address is passed. With reference to DTB, Boot
+  // info structure can be populated.
+  // If cookie1 doesn't have any value, then Boot info is copied from
+  // Sharedbuffer.
+  if (cookie1) {
+    DtbAddress = (void *)cookie1;
+    PopulateBootinformation (&PayloadBootInfo, DtbAddress);
+  } else {
+    PayloadBootInfo = (EFI_SECURE_PARTITION_BOOT_INFO *)SharedBufAddress;
+  }
+
   if (PayloadBootInfo == NULL) {
     Status = EFI_UNSUPPORTED;
     goto finish;
   }
+
+  PrintBootinformation (PayloadBootInfo);
 
   // Locate PE/COFF File information for the Standalone MM core module
   Status = LocateStandaloneMmCorePeCoffData (

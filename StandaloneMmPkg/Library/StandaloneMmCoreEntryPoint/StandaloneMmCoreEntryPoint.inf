@@ -30,6 +30,7 @@
   X64/StandaloneMmCoreEntryPoint.c
 
 [Packages]
+  EmbeddedPkg/EmbeddedPkg.dec
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
   StandaloneMmPkg/StandaloneMmPkg.dec
@@ -40,10 +41,12 @@
 [LibraryClasses]
   BaseLib
   DebugLib
+  FdtLib
 
 [LibraryClasses.AARCH64]
   StandaloneMmMmuLib
   ArmSvcLib
+  FdtLib
 
 [Guids]
   gMpInformationHobGuid
